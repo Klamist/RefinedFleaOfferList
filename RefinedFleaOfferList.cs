@@ -1,8 +1,8 @@
 ﻿using BepInEx;
 using BepInEx.Configuration;
-using EFT.InventoryLogic;
 using EFT.UI.Ragfair;
 using HarmonyLib;
+using RefinedFleaListPlugin;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -11,34 +11,41 @@ namespace RefinedFleaOfferList
     [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.0.0")]
     public class RefinedFleaListPlugin : BaseUnityPlugin
     {
-        public static ConfigEntry<bool> Thinner;
-        public static ConfigEntry<int> CheapestCount;
-        public static ConfigEntry<int> PageCount;
+        public static ConfigEntry<bool> Activation;
+        public static ConfigEntry<int> PageCapacity;
         private static int OriginalPageCount = -1;
+        public static ConfigEntry<bool> RetainFull;
+        public static ConfigEntry<bool> RetainRub;
+        public static ConfigEntry<int> SingleCount;
         public static ConfigEntry<bool> SingleShowAll;
-        public static ConfigEntry<bool> AlwaysShowRub;
-        public static ConfigEntry<bool> ShowFullDura;
 
         public static BepInEx.Logging.ManualLogSource Log;
         private Harmony harmony;
 
         private void Awake()
         {
-            Thinner = Config.Bind("General", "Activation", true,
-                "Only show N cheapest of each item.\nWill force sorting by price from low to high.");
-            CheapestCount = Config.Bind("General", "Offer Number Per Item", 1, "How many cheapest offers to show.");
-            PageCount = Config.Bind("General", "Page Capacity (?)", 300,
-                "Cover vanilla setting for how many offers per flea page\n" +
-                "Hidden orders still occupy the count, need a big num to contain more items in one page.\n" +
+            Activation = Config.Bind("General", "Activate All", true,
+                "Only show the cheapest of each item.\nWill force sorting by price from low to high.");
+
+            PageCapacity = Config.Bind("General", "Page Capacity", 300,
+                "How many original offers to process in one flea page\n" +
+                "Hidden orders still occupy the count, thus we need a big num to contain more items in one page.\n" +
                 "Auto recover to original EFT value when deactivate.");
-            SingleShowAll = Config.Bind("General", "Single Item Show All (?)", false,
-                "Show all offers when select one specific item.");
-            AlwaysShowRub = Config.Bind("General", "Show Ruble Offer too (?)", true,
-                "Additionally show cheapest Ruble offer.\n" +
-                "If you want only Ruble offers, use EFT flea filter.");
-            ShowFullDura = Config.Bind("General", "Show Full Durability too (?)", true,
-                "Additionally show cheapest full durability offer.\n" +
-                "If you want only FullDura offers, use EFT flea filter.");
+
+            RetainFull = Config.Bind("General", "Retain Full-condition Offer", false,
+                "Retain cheapest full durability offer when browse >1 type of items\n" +
+                "If you want only FullDura offers, use vanilla EFT flea filter.");
+
+            RetainRub = Config.Bind("General", "Retain Ruble Offer", false,
+                "Retain cheapest Ruble offer when browse >1 type of items\n" +
+                "If you want only Ruble offers, use vanilla EFT flea filter.");
+
+            SingleCount = Config.Bind("General", "Single Item Offers Quantity", 3,
+                "When select one specific item, show the N cheapest offers.\n" +
+                "Will *2 +4 if all items have no difference.");
+
+            SingleShowAll = Config.Bind("General", "Vanilla Single Item Page", false,
+                "When select one specific item, show all offers in original arrangement.");
 
             Log = Logger;
             harmony = new Harmony("ciallo.RefinedFleaOfferList");
@@ -68,8 +75,8 @@ namespace RefinedFleaOfferList
                         if (OriginalPageCount == -1)
                             OriginalPageCount = currentValue;
 
-                        if (RefinedFleaListPlugin.Thinner.Value)
-                            offersPerPageProp.SetValue(ragFairClass, RefinedFleaListPlugin.PageCount.Value);
+                        if (RefinedFleaListPlugin.Activation.Value)
+                            offersPerPageProp.SetValue(ragFairClass, RefinedFleaListPlugin.PageCapacity.Value);
                         else
                             offersPerPageProp.SetValue(ragFairClass, OriginalPageCount);
                     }
@@ -83,7 +90,7 @@ namespace RefinedFleaOfferList
         {
             static void Postfix(OfferViewList __instance)
             {
-                if (!RefinedFleaListPlugin.Thinner.Value) return;
+                if (!RefinedFleaListPlugin.Activation.Value) return;
 
                 // 取 OfferViewList 的 eviewListType_0 字段
                 var viewTypeField = AccessTools.Field(typeof(OfferViewList), "eviewListType_0");
@@ -96,13 +103,40 @@ namespace RefinedFleaOfferList
                 var ragFairClass = (RagFairClass)ragFairClassField.GetValue(__instance);
                 if (ragFairClass == null) return;
 
-                var offers = ragFairClass.Offers?.ToList();
-                if (offers == null || offers.Count == 0) return;
+                // 先获取全部订单，判断是否单项物品，然后去除不可用订单
+                var allOffers = ragFairClass.Offers?.ToList() ?? new List<Offer>();
+                if (allOffers.Count == 0) return;
 
-                bool singleTemplate = offers.Select(o => o.Item.TemplateId).Distinct().Count() == 1;
-                if (singleTemplate && RefinedFleaListPlugin.SingleShowAll.Value)
-                    return;
+                bool singleTemplate = allOffers.Select(o => o.Item.TemplateId).Distinct().Count() == 1;
+                if (singleTemplate && RefinedFleaListPlugin.SingleShowAll.Value) return;
 
+                var offers = allOffers.Where(o => !o.NotAvailable).ToList();
+                if (offers.Count == 0) return;
+
+                int cheapestCount = singleTemplate
+                    ? RefinedFleaListPlugin.SingleCount.Value
+                    : 1;
+
+                // 若当前 offers 物品完全相同，多保留一些
+                if (singleTemplate)
+                {
+                    bool allSame = offers
+                        .GroupBy(o =>
+                        {
+                            var parts = o.Item.GetAllVisibleItems()
+                                              .Select(p => p.TemplateId.ToString())
+                                              .OrderBy(id => id);
+                            string buildSignature = string.Join("_", parts);
+
+                            var (current, max) = GetItemState.Get(o.Item);
+                            return $"{o.Item.TemplateId}_{buildSignature}_{current}_{max}";
+                        })
+                        .Count() == 1;
+
+                    if (allSame) cheapestCount = cheapestCount*2 + 4;
+                }
+
+                // 按物品模板+子物品组合分组，保留每组中价格最低的 N 个订单
                 var filtered = offers
                     .GroupBy(o =>
                     {
@@ -113,11 +147,11 @@ namespace RefinedFleaOfferList
                         return $"{o.Item.TemplateId}_{buildSignature}";
                     })
                     .SelectMany(g => g.OrderBy(o => o.SummaryCost)
-                                      .Take(RefinedFleaListPlugin.CheapestCount.Value))
+                                      .Take(cheapestCount))
                     .ToList();
 
-                // 额外保留最低价卢布订单并重新排序
-                if (RefinedFleaListPlugin.AlwaysShowRub.Value)
+                // 额外保留最低价卢布订单
+                if (RefinedFleaListPlugin.RetainRub.Value || singleTemplate)
                 {
                     var rubId = "5449016a4bdc2d6f028b456f";
                     var rubOffers = offers
@@ -138,58 +172,84 @@ namespace RefinedFleaOfferList
                     }
                 }
 
-                // 额外保留最低价满耐久订单并重新排序
-                if (RefinedFleaListPlugin.ShowFullDura.Value)
+                // 额外保留最低价满状态订单
+                if (RefinedFleaListPlugin.RetainFull.Value || singleTemplate)
                 {
                     var existingIds = new HashSet<string>(filtered.Select(f => f.Id));
-                    var fullDuraOffer = offers
-                        .Select(o =>
+
+                    // 先计算每个 offer 的状态
+                    var offerStates = offers.Select(o =>
+                    {
+                        var (current, max) = GetItemState.Get(o.Item); // 你已改好，不再返回 isFull
+                        return new { Offer = o, Current = current, Max = max };
+                    }).ToList();
+
+                    // 按模板 + 子物品结构分组
+                    var grouped = offerStates
+                        .GroupBy(x => new
                         {
-                            var rep = o.Item.GetItemComponent<RepairableComponent>();
-                            if (rep == null)
-                            {
-                                return null;
-                            }
-                            return (rep.MaxDurability == 100 && rep.Durability == rep.MaxDurability) ? o : null;
-                        })
-                        .Where(o => o != null)
-                        .OrderBy(o => o.SummaryCost)
-                        .FirstOrDefault();
+                            x.Offer.Item.TemplateId,
+                            SubItems = string.Join(",", x.Offer.Item.GetAllVisibleItems()
+                                .Select(i => i.TemplateId)
+                                .OrderBy(id => id))
+                        });
 
-                    if (fullDuraOffer != null && !existingIds.Contains(fullDuraOffer.Id))
+                    foreach (var group in grouped)
                     {
-                        filtered.Add(fullDuraOffer);
-                        existingIds.Add(fullDuraOffer.Id);
-                    }
+                        // 找出该组的最大当前值
+                        float maxCurrent = group.Max(x => x.Current);
 
-                    // 如果这条不是卢布订单，再找最便宜满耐久且卢布的订单（同样要求100/100）
-                    var rubId = "5449016a4bdc2d6f028b456f";
-                    bool isRub = fullDuraOffer != null &&
-                                 fullDuraOffer.Requirements != null &&
-                                 fullDuraOffer.Requirements.Any(r => r.TemplateId == rubId);
-
-                    if (!isRub && RefinedFleaListPlugin.AlwaysShowRub.Value)
-                    {
-                        var fullDuraRubOffer = offers
-                            .Select(o =>
-                            {
-                                var rep = o.Item.GetItemComponent<RepairableComponent>();
-                                return (rep != null && rep.MaxDurability == 100 && rep.Durability == rep.MaxDurability &&
-                                        o.Requirements != null && o.Requirements.Any(r => r.TemplateId == rubId)) ? o : null;
-                            })
-                            .Where(o => o != null)
-                            .OrderBy(o => o.SummaryCost)
+                        var bestOffer = group
+                            .Where(x => x.Current == maxCurrent)
+                            .OrderBy(x => x.Offer.SummaryCost)
+                            .Select(x => x.Offer)
                             .FirstOrDefault();
 
-                        if (fullDuraRubOffer != null && !existingIds.Contains(fullDuraRubOffer.Id))
+                        if (bestOffer != null && !existingIds.Contains(bestOffer.Id))
                         {
-                            filtered.Add(fullDuraRubOffer);
-                            existingIds.Add(fullDuraRubOffer.Id);
+                            filtered.Add(bestOffer);
+                            existingIds.Add(bestOffer.Id);
+                        }
+
+                        // 如果需要额外保留卢布订单
+                        var rubId = "5449016a4bdc2d6f028b456f";
+                        var bestRubOffer = group
+                            .Where(x => x.Current == maxCurrent &&
+                                        x.Offer.Requirements != null &&
+                                        x.Offer.Requirements.Any(r => r.TemplateId == rubId))
+                            .OrderBy(x => x.Offer.SummaryCost)
+                            .Select(x => x.Offer)
+                            .FirstOrDefault();
+
+                        if (bestRubOffer != null && !existingIds.Contains(bestRubOffer.Id))
+                        {
+                            filtered.Add(bestRubOffer);
+                            existingIds.Add(bestRubOffer.Id);
                         }
                     }
                 }
 
-                if(RefinedFleaListPlugin.AlwaysShowRub.Value || RefinedFleaListPlugin.ShowFullDura.Value)
+                // 单物品情况加回不可用订单
+                if (singleTemplate)
+                {
+                    var notAvailableOffers = ragFairClass.Offers?
+                        .Where(o => o.NotAvailable)
+                        .ToList() ?? new List<Offer>();
+
+                    if (notAvailableOffers.Count > 0)
+                    {
+                        foreach (var naOffer in notAvailableOffers)
+                        {
+                            if (!filtered.Any(f => f.Id == naOffer.Id))
+                            {
+                                filtered.Add(naOffer);
+                            }
+                        }
+                    }
+                }
+
+                // 最后按价格排序
+                if (RefinedFleaListPlugin.RetainRub.Value || RefinedFleaListPlugin.RetainFull.Value || singleTemplate)
                     filtered = filtered.OrderBy(o => o.SummaryCost).ToList();
 
                 ragFairClass.ClearOffers();

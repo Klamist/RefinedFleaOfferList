@@ -73,6 +73,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="GetItemState.cs" />
     <Compile Include="RefinedFleaOfferList.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
