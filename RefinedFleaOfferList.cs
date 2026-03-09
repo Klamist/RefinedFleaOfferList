@@ -25,8 +25,8 @@ namespace RefinedFleaOfferList
         private void Awake()
         {
             Thinner = Config.Bind("General", "Activation", true,
-                "When browsing multi-types of items in flea, only show N cheapest of each.");
-            CheapestCount = Config.Bind("General", "Offer Number Per Item", 1);
+                "Only show N cheapest of each item.\nWill force sorting by price from low to high.");
+            CheapestCount = Config.Bind("General", "Offer Number Per Item", 1, "How many cheapest offers to show.");
             PageCount = Config.Bind("General", "Page Capacity (?)", 300,
                 "Cover vanilla setting for how many offers per flea page\n" +
                 "Hidden orders still occupy the count, need a big num to contain more items in one page.\n" +
@@ -84,6 +84,13 @@ namespace RefinedFleaOfferList
             static void Postfix(OfferViewList __instance)
             {
                 if (!RefinedFleaListPlugin.Thinner.Value) return;
+
+                // 取 OfferViewList 的 eviewListType_0 字段
+                var viewTypeField = AccessTools.Field(typeof(OfferViewList), "eviewListType_0");
+                if (viewTypeField == null) return;
+
+                var viewType = (EViewListType)viewTypeField.GetValue(__instance);
+                if (viewType != EViewListType.AllOffers && viewType != EViewListType.WishList) return;
 
                 var ragFairClassField = AccessTools.Field(typeof(OfferViewList), "ragFairClass");
                 var ragFairClass = (RagFairClass)ragFairClassField.GetValue(__instance);
