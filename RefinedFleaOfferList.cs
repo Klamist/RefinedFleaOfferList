@@ -110,7 +110,9 @@ namespace RefinedFleaOfferList
                 bool singleTemplate = allOffers.Select(o => o.Item.TemplateId).Distinct().Count() == 1;
                 if (singleTemplate && RefinedFleaListPlugin.SingleShowAll.Value) return;
 
-                var offers = allOffers.Where(o => !o.NotAvailable).ToList();
+                var offers = allOffers
+                    .Where(o => !o.NotAvailable && !o.Locked)
+                    .ToList();
                 if (offers.Count == 0) return;
 
                 int cheapestCount = singleTemplate
@@ -232,17 +234,17 @@ namespace RefinedFleaOfferList
                 // 单物品情况加回不可用订单
                 if (singleTemplate)
                 {
-                    var notAvailableOffers = ragFairClass.Offers?
-                        .Where(o => o.NotAvailable)
+                    var blockedOffers = ragFairClass.Offers?
+                        .Where(o => o.NotAvailable || o.Locked)
                         .ToList() ?? new List<Offer>();
 
-                    if (notAvailableOffers.Count > 0)
+                    if (blockedOffers.Count > 0)
                     {
-                        foreach (var naOffer in notAvailableOffers)
+                        foreach (var bo in blockedOffers)
                         {
-                            if (!filtered.Any(f => f.Id == naOffer.Id))
+                            if (!filtered.Any(f => f.Id == bo.Id))
                             {
-                                filtered.Add(naOffer);
+                                filtered.Add(bo);
                             }
                         }
                     }
