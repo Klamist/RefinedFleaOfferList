@@ -136,7 +136,6 @@ namespace RefinedFleaOfferList
                             existingIds.Add(rubOffer.Id);
                         }
                     }
-                    filtered = filtered.OrderBy(o => o.SummaryCost).ToList();
                 }
 
                 // 额外保留最低价满耐久订单并重新排序
@@ -188,8 +187,10 @@ namespace RefinedFleaOfferList
                             existingIds.Add(fullDuraRubOffer.Id);
                         }
                     }
-                    filtered = filtered.OrderBy(o => o.SummaryCost).ToList();
                 }
+
+                if(RefinedFleaListPlugin.AlwaysShowRub.Value || RefinedFleaListPlugin.ShowFullDura.Value)
+                    filtered = filtered.OrderBy(o => o.SummaryCost).ToList();
 
                 ragFairClass.ClearOffers();
                 foreach (var offer in filtered)
