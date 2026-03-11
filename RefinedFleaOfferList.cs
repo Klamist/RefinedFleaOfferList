@@ -111,9 +111,15 @@ namespace RefinedFleaOfferList
                 if (singleTemplate && SingleVanilla.Value) return;
 
                 // 去除不可用订单、GP币订单
-                var offers = allOffers
-                    .Where(o => !o.Locked && o.CanBeBought)
-                    .ToList();
+                List<Offer> offers;
+                if (!singleTemplate)
+                {
+                    offers = allOffers
+                        .Where(o => !o.Locked && o.CanBeBought)
+                        .ToList();
+                }
+                else
+                    offers = allOffers;
 
                 if (NoGP.Value)
                 {
@@ -255,23 +261,6 @@ namespace RefinedFleaOfferList
                                 filtered.Add(bestRubOffer);
                                 existingIds.Add(bestRubOffer.Id);
                             }
-                        }
-                    }
-                }
-
-                // 单物品情况加回不可用订单
-                if (singleTemplate)
-                {
-                    var blockedOffers = ragFairClass.Offers?
-                        .Where(o => !o.Locked && o.CanBeBought)
-                        .ToList() ?? new List<Offer>();
-
-                    if (blockedOffers.Count > 0)
-                    {
-                        foreach (var bo in blockedOffers)
-                        {
-                            if (!filtered.Any(f => f.Id == bo.Id))
-                                filtered.Add(bo);
                         }
                     }
                 }
