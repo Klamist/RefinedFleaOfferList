@@ -8,7 +8,7 @@ using System.Linq;
 
 namespace RefinedFleaOfferList
 {
-    [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.0.0")]
+    [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.0.1")]
     public class RefinedFleaListPlugin : BaseUnityPlugin
     {
         public static ConfigEntry<bool> Activation;
@@ -112,7 +112,7 @@ namespace RefinedFleaOfferList
 
                 // 去除不可用订单、GP币订单
                 var offers = allOffers
-                    .Where(o => !o.NotAvailable && !o.Locked)
+                    .Where(o => !o.Locked && o.CanBeBought)
                     .ToList();
 
                 if (NoGP.Value)
@@ -128,12 +128,12 @@ namespace RefinedFleaOfferList
                     ? SingleCount.Value
                     : 1;
 
-                // 若某类物品只有 NotAvailable 或 Locked 状态的订单，则保留这些订单
+                // 若某类物品只有不可用订单则保留
                 var groupedByTemplate = allOffers.GroupBy(o => o.Item.TemplateId);
                 bool hasUsable;
                 foreach (var group in groupedByTemplate)
                 {
-                    hasUsable = group.Any(o => !o.NotAvailable && !o.Locked);
+                    hasUsable = group.Any(o => !o.Locked && o.CanBeBought);
                     if (!hasUsable)
                     {
                         foreach (var blocked in group)
@@ -207,7 +207,7 @@ namespace RefinedFleaOfferList
                     // 先计算每个 offer 的状态
                     var offerStates = offers.Select(o =>
                     {
-                        var (current, max) = GetItemState.Get(o.Item); // 你已改好，不再返回 isFull
+                        var (current, max) = GetItemState.Get(o.Item);
                         return new { Offer = o, Current = current, Max = max };
                     }).ToList();
 
@@ -239,7 +239,7 @@ namespace RefinedFleaOfferList
                         }
 
                         // 如果需要额外保留卢布订单
-                        if (RetainRub.Value)
+                        if (RetainRub.Value || singleTemplate)
                         {
                             var rubId = "5449016a4bdc2d6f028b456f";
                             var bestRubOffer = group
@@ -263,7 +263,7 @@ namespace RefinedFleaOfferList
                 if (singleTemplate)
                 {
                     var blockedOffers = ragFairClass.Offers?
-                        .Where(o => o.NotAvailable || o.Locked)
+                        .Where(o => !o.Locked && o.CanBeBought)
                         .ToList() ?? new List<Offer>();
 
                     if (blockedOffers.Count > 0)
