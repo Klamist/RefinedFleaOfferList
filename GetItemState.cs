@@ -63,8 +63,8 @@ namespace RefinedFleaListPlugin
                 return (remaining, key.Template.MaximumNumberOfUsage);
             }
 
-            // RepairKitsItemClass
-            var kit = item as RepairKitsItemClass;
+            // RepairKit
+            var kit = item as RepairKit;
             if (kit != null)
             {
                 return (kit.Resource, kit.MaxRepairResource);

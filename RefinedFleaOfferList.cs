@@ -8,7 +8,7 @@ using System.Linq;
 
 namespace RefinedFleaOfferList
 {
-    [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.0.1")]
+    [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.1.0")]
     public class RefinedFleaListPlugin : BaseUnityPlugin
     {
         public static ConfigEntry<bool> Activation;
@@ -52,59 +52,59 @@ namespace RefinedFleaOfferList
             harmony.PatchAll();
         }
 
-        private void OnDisable()
+        void OnDestroy()
         {
             harmony?.UnpatchSelf();
         }
 
         // 设置分页上限为指定值，若不启用脚本则改为原值
-        [HarmonyPatch(typeof(OfferViewList), "method_0")]
-        class Patch_OfferViewList_method_0
+        [HarmonyPatch(typeof(OfferViewList), "ManageOffers")]
+        class Patch_OfferViewList_ManageOffers
         {
             static void Prefix(OfferViewList __instance)
             {
-                var ragFairClassField = AccessTools.Field(typeof(OfferViewList), "ragFairClass");
-                var ragFairClass = (RagFairClass)ragFairClassField.GetValue(__instance);
-                if (ragFairClass != null)
+                var _ragfairField = AccessTools.Field(typeof(OfferViewList), "_ragfair");
+                var _ragfair = (RagFair)_ragfairField.GetValue(__instance);
+                if (_ragfair != null)
                 {
-                    var offersPerPageProp = AccessTools.Property(typeof(RagFairClass), "OffersPerPageCount");
+                    var offersPerPageProp = AccessTools.Property(typeof(RagFair), "OffersPerPageCount");
                     if (offersPerPageProp != null)
                     {
-                        int currentValue = (int)offersPerPageProp.GetValue(ragFairClass);
+                        int currentValue = (int)offersPerPageProp.GetValue(_ragfair);
 
                         if (OriginalPageCount == -1)
                             OriginalPageCount = currentValue;
 
                         if (Activation.Value)
-                            offersPerPageProp.SetValue(ragFairClass, PageCapacity.Value);
+                            offersPerPageProp.SetValue(_ragfair, PageCapacity.Value);
                         else
-                            offersPerPageProp.SetValue(ragFairClass, OriginalPageCount);
+                            offersPerPageProp.SetValue(_ragfair, OriginalPageCount);
                     }
                 }
             }
         }
 
         // 按物品模板+子物品组合去重
-        [HarmonyPatch(typeof(OfferViewList), "method_14")]
-        class Patch_OfferViewList_method_14
+        [HarmonyPatch(typeof(OfferViewList), "HandleNodeSelection")]
+        class Patch_OfferViewList_HandleNodeSelection
         {
             static void Postfix(OfferViewList __instance)
             {
                 if (!Activation.Value) return;
 
                 // 取 OfferViewList 的 eviewListType_0 字段
-                var viewTypeField = AccessTools.Field(typeof(OfferViewList), "eviewListType_0");
+                var viewTypeField = AccessTools.Field(typeof(OfferViewList), "_viewListType");
                 if (viewTypeField == null) return;
 
                 var viewType = (EViewListType)viewTypeField.GetValue(__instance);
                 if (viewType != EViewListType.AllOffers && viewType != EViewListType.WishList) return;
 
-                var ragFairClassField = AccessTools.Field(typeof(OfferViewList), "ragFairClass");
-                var ragFairClass = (RagFairClass)ragFairClassField.GetValue(__instance);
-                if (ragFairClass == null) return;
+                var _ragfairField = AccessTools.Field(typeof(OfferViewList), "_ragfair");
+                var _ragfair = (RagFair)_ragfairField.GetValue(__instance);
+                if (_ragfair == null) return;
 
                 // 先获取全部订单，判断是否单项物品
-                var allOffers = ragFairClass.Offers?.ToList() ?? new List<Offer>();
+                var allOffers = _ragfair.Offers?.ToList() ?? new List<Offer>();
                 if (allOffers.Count == 0) return;
 
                 bool singleTemplate = allOffers.Select(o => o.Item.TemplateId).Distinct().Count() == 1;
@@ -121,7 +121,7 @@ namespace RefinedFleaOfferList
                 else
                     offers = allOffers;
 
-                if (NoGP.Value)
+                if (NoGP.Value && !singleTemplate)
                 {
                     string gpId = "5d235b4d86f7742e017bc88a";
                     offers = offers
@@ -183,6 +183,12 @@ namespace RefinedFleaOfferList
                                       .Take(cheapestCount))
                     .ToList();
 
+                //Log.LogInfo("=== Debug: Final Filtered Offers (before adding to _ragfair) ===");
+                //foreach (var o in filtered)
+                //{
+                //    Log.LogInfo($"Locked: {o.Locked}, CanBeBought: {o.CanBeBought}, Cost: {o.SummaryCost}");
+                //}
+
                 // 额外保留最低价卢布订单
                 if (RetainRub.Value || singleTemplate)
                 {
@@ -190,6 +196,7 @@ namespace RefinedFleaOfferList
                     var rubOffers = offers
                         .Where(o => o.Requirements != null &&
                                     o.Requirements.Any(r => r.TemplateId == rubId))
+                        .OrderByDescending(o => !o.Locked && o.CanBeBought)
                         .GroupBy(o => o.Item.TemplateId.ToString())
                         .Select(g => g.OrderBy(o => o.SummaryCost).FirstOrDefault())
                         .Where(o => o != null);
@@ -214,8 +221,8 @@ namespace RefinedFleaOfferList
                     var offerStates = offers.Select(o =>
                     {
                         var (current, max) = GetItemState.Get(o.Item);
-                        return new { Offer = o, Current = current, Max = max };
-                    }).ToList();
+                        return new { Offer = o, Current = current, Max = max, Usable = !o.Locked && o.CanBeBought};
+                        }).ToList();
 
                     // 按模板 + 子物品结构分组
                     var grouped = offerStates
@@ -232,8 +239,10 @@ namespace RefinedFleaOfferList
                         // 找出该组的最大当前值
                         float maxCurrent = group.Max(x => x.Current);
 
-                        var bestOffer = group
-                            .Where(x => x.Current == maxCurrent)
+                        var candidates = group.Where(x => x.Current == maxCurrent).ToList();
+                        var usableCandidates = candidates.Where(x => x.Usable).ToList();
+
+                        var bestOffer = (usableCandidates.Count > 0 ? usableCandidates : candidates)
                             .OrderBy(x => x.Offer.SummaryCost)
                             .Select(x => x.Offer)
                             .FirstOrDefault();
@@ -248,10 +257,14 @@ namespace RefinedFleaOfferList
                         if (RetainRub.Value || singleTemplate)
                         {
                             var rubId = "5449016a4bdc2d6f028b456f";
-                            var bestRubOffer = group
+                            var rubCandidates = group
                                 .Where(x => x.Current == maxCurrent &&
                                             x.Offer.Requirements != null &&
                                             x.Offer.Requirements.Any(r => r.TemplateId == rubId))
+                                .ToList();
+                            var usableRub = rubCandidates.Where(x => x.Usable).ToList();
+
+                            var bestRubOffer = (usableRub.Count > 0 ? usableRub : rubCandidates)
                                 .OrderBy(x => x.Offer.SummaryCost)
                                 .Select(x => x.Offer)
                                 .FirstOrDefault();
@@ -269,9 +282,9 @@ namespace RefinedFleaOfferList
                 if (RetainRub.Value || RetainFull.Value || singleTemplate)
                     filtered = filtered.OrderBy(o => o.SummaryCost).ToList();
 
-                ragFairClass.ClearOffers();
+                _ragfair.ClearOffers();
                 foreach (var offer in filtered)
-                    ragFairClass.Offers.Add(offer);
+                    _ragfair.Offers.Add(offer);
             }
         }
     }
