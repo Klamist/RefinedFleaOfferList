@@ -1,18 +1,22 @@
 ﻿using BepInEx;
 using BepInEx.Configuration;
+using Comfort.Common;
+using EFT;
 using EFT.UI.Ragfair;
 using HarmonyLib;
 using RefinedFleaListPlugin;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
 namespace RefinedFleaOfferList
 {
-    [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.1.0")]
+    [BepInPlugin("ciallo.RefinedFleaOfferList", "Refined Flea Offer List", "1.2.0")]
     public class RefinedFleaListPlugin : BaseUnityPlugin
     {
         public static ConfigEntry<bool> Activation;
         public static ConfigEntry<bool> NoGP;
+        public static ConfigEntry<bool> HideDis;
         public static ConfigEntry<int> PageCapacity;
         private static int OriginalPageCount = -1;
         public static ConfigEntry<bool> RetainFull;
@@ -29,6 +33,8 @@ namespace RefinedFleaOfferList
                 "Only show the cheapest of each item.\nWill force sorting by price from low to high.");
             NoGP = Config.Bind("General", "No GP Offers", false,
                 "Remove all GP coin offers when browsing flea. Can't affect weapon build purchase.");
+            HideDis = Config.Bind("General", "Hide Disabled Offers", false,
+                "Remove all disabled offers on page, unless there has too few or only disabled offers");
             PageCapacity = Config.Bind("General", "Page Capacity", 300,
                 "How many original offers to process in one flea page\n" +
                 "Hidden orders still occupy the count, thus we need a big num to contain more items in one page.\n" +
@@ -55,6 +61,62 @@ namespace RefinedFleaOfferList
         void OnDestroy()
         {
             harmony?.UnpatchSelf();
+        }
+
+        public static bool IsOfferUsable(Offer o, RagFair ragfair, string profileId, int delaySinceOfferAdd)
+        {
+            if (o == null) return false;
+
+            // ---- flag2 部分（时间/过期） ----
+            bool flag2 = !o.Expired;
+
+            // ---- 基础 flag 部分 ----
+            bool flag = !o.NotAvailable;
+
+            // 是否是自己的订单（OfferNotAvailable）
+            bool isMyOffer = o.User != null && !string.IsNullOrEmpty(profileId) && profileId == o.User.Id;
+            if (isMyOffer) flag = false;
+
+            // 无库存
+            if (o.TotalItemCount <= 0) flag = false;
+
+            // 个人限购
+            if (o.LimitsReached) flag = false;
+
+            // 被任务锁定
+            if (o.Locked) flag = false;
+
+            // ---- 商人订单特殊判断 ----
+            bool isTraderOffer = !o.NotAvailable && o.MemberType == EMemberCategory.Trader;
+            if (isTraderOffer)
+            {
+                Profile.TraderInfo trader = null;
+                try
+                {
+                    var profile = Singleton<Profile>.Instance; // 视你的 EFT 版本，也可能是其他方式取 Profile
+                    if (profile != null && profile.TradersInfo != null && o.User != null)
+                        profile.TradersInfo.TryGetValue(o.User.Id, out trader);
+                }
+                catch { /* 拿不到就当不可用 */ }
+
+                if (trader == null)
+                {
+                    flag = false;
+                }
+                else
+                {
+                    if (!trader.Available) flag = false;                              // 商人未解锁
+                    if (trader.LoyaltyLevel < o.LoyaltyLevel) flag = false;           // 忠诚度/威望不够
+                }
+            }
+            else
+            {
+                // ---- 玩家订单：挂单延迟 ----
+                var creationTime = DateTimeExtensions.UtcNow - o.StartTime;
+                if (creationTime.TotalSeconds < delaySinceOfferAdd) flag2 = false;
+            }
+
+            return flag && flag2;
         }
 
         // 设置分页上限为指定值，若不启用脚本则改为原值
@@ -103,25 +165,42 @@ namespace RefinedFleaOfferList
                 var _ragfair = (RagFair)_ragfairField.GetValue(__instance);
                 if (_ragfair == null) return;
 
+                // ---- 新增：取 profileId 和 delaySinceOfferAdd ----
+                string profileId = null;
+                int delaySinceOfferAdd = 0;
+                try
+                {
+                    // 从 OfferViewList 里反射拿 profileId（如果有对应字段）
+                    var profileIdField = AccessTools.Field(typeof(OfferViewList), "_profileId");
+                    if (profileIdField != null)
+                        profileId = profileIdField.GetValue(__instance) as string;
+
+                    // 从 GlobalConfiguration 拿 delaySinceOfferAdd
+                    var gc = Singleton<GlobalConfiguration>.Instance;
+                    if (gc != null && gc.RagFair != null)
+                        delaySinceOfferAdd = gc.RagFair.delaySinceOfferAdd;
+                }
+                catch { /* 取不到就用默认值 */ }
+
                 // 先获取全部订单，判断是否单项物品
                 var allOffers = _ragfair.Offers?.ToList() ?? new List<Offer>();
                 if (allOffers.Count == 0) return;
 
+                // 统一判定可用性
+                Func<Offer, bool> usable = o => IsOfferUsable(o, _ragfair, profileId, delaySinceOfferAdd);
+
                 bool singleTemplate = allOffers.Select(o => o.Item.TemplateId).Distinct().Count() == 1;
                 if (singleTemplate && SingleVanilla.Value) return;
 
-                // 去除不可用订单、GP币订单
+                // 去除不可用订单
                 List<Offer> offers;
-                if (!singleTemplate)
-                {
-                    offers = allOffers
-                        .Where(o => !o.Locked && o.CanBeBought)
-                        .ToList();
-                }
+                if (!singleTemplate || HideDis.Value)
+                    offers = allOffers.Where(usable).ToList();
                 else
                     offers = allOffers;
 
-                if (NoGP.Value && !singleTemplate)
+                // 去除GP订单
+                if (NoGP.Value)
                 {
                     string gpId = "5d235b4d86f7742e017bc88a";
                     offers = offers
@@ -139,7 +218,7 @@ namespace RefinedFleaOfferList
                 bool hasUsable;
                 foreach (var group in groupedByTemplate)
                 {
-                    hasUsable = group.Any(o => !o.Locked && o.CanBeBought);
+                    hasUsable = group.Any(usable);
                     if (!hasUsable)
                     {
                         foreach (var blocked in group)
@@ -183,12 +262,6 @@ namespace RefinedFleaOfferList
                                       .Take(cheapestCount))
                     .ToList();
 
-                //Log.LogInfo("=== Debug: Final Filtered Offers (before adding to _ragfair) ===");
-                //foreach (var o in filtered)
-                //{
-                //    Log.LogInfo($"Locked: {o.Locked}, CanBeBought: {o.CanBeBought}, Cost: {o.SummaryCost}");
-                //}
-
                 // 额外保留最低价卢布订单
                 if (RetainRub.Value || singleTemplate)
                 {
@@ -196,7 +269,7 @@ namespace RefinedFleaOfferList
                     var rubOffers = offers
                         .Where(o => o.Requirements != null &&
                                     o.Requirements.Any(r => r.TemplateId == rubId))
-                        .OrderByDescending(o => !o.Locked && o.CanBeBought)
+                        .OrderByDescending(usable)
                         .GroupBy(o => o.Item.TemplateId.ToString())
                         .Select(g => g.OrderBy(o => o.SummaryCost).FirstOrDefault())
                         .Where(o => o != null);
@@ -221,7 +294,7 @@ namespace RefinedFleaOfferList
                     var offerStates = offers.Select(o =>
                     {
                         var (current, max) = GetItemState.Get(o.Item);
-                        return new { Offer = o, Current = current, Max = max, Usable = !o.Locked && o.CanBeBought};
+                        return new { Offer = o, Current = current, Max = max, Usable = usable(o) };
                         }).ToList();
 
                     // 按模板 + 子物品结构分组
