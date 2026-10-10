@@ -63,60 +63,45 @@ namespace RefinedFleaOfferList
             harmony?.UnpatchSelf();
         }
 
-        public static bool IsOfferUsable(Offer o, RagFair ragfair, string profileId, int delaySinceOfferAdd)
+        public static bool IsOfferUsable(Offer o, string profileId, Dictionary<MongoID, Profile.TraderInfo> traders, int delaySinceOfferAdd)
         {
             if (o == null) return false;
 
-            // ---- flag2 部分（时间/过期） ----
-            bool flag2 = !o.Expired;
+            // ---- 基础：NotAvailable / 过期 / 无库存 ----
+            if (o.NotAvailable) return false;
+            if (o.Expired) return false;
+            if (o.TotalItemCount <= 0) return false;
 
-            // ---- 基础 flag 部分 ----
-            bool flag = !o.NotAvailable;
+            // ---- 被任务锁定 ----
+            if (o.Locked) return false;
 
-            // 是否是自己的订单（OfferNotAvailable）
-            bool isMyOffer = o.User != null && !string.IsNullOrEmpty(profileId) && profileId == o.User.Id;
-            if (isMyOffer) flag = false;
+            // ---- 个人限购 ----
+            if (o.LimitsReached) return false;
 
-            // 无库存
-            if (o.TotalItemCount <= 0) flag = false;
-
-            // 个人限购
-            if (o.LimitsReached) flag = false;
-
-            // 被任务锁定
-            if (o.Locked) flag = false;
+            // ---- 自己的订单（OfferNotAvailable） ----
+            if (o.User != null && !string.IsNullOrEmpty(profileId) && o.User.Id == profileId)
+                return false;
 
             // ---- 商人订单特殊判断 ----
             bool isTraderOffer = !o.NotAvailable && o.MemberType == EMemberCategory.Trader;
             if (isTraderOffer)
             {
                 Profile.TraderInfo trader = null;
-                try
-                {
-                    var profile = Singleton<Profile>.Instance; // 视你的 EFT 版本，也可能是其他方式取 Profile
-                    if (profile != null && profile.TradersInfo != null && o.User != null)
-                        profile.TradersInfo.TryGetValue(o.User.Id, out trader);
-                }
-                catch { /* 拿不到就当不可用 */ }
+                if (traders != null && o.User != null)
+                    traders.TryGetValue(o.User.Id, out trader);
 
-                if (trader == null)
-                {
-                    flag = false;
-                }
-                else
-                {
-                    if (!trader.Available) flag = false;                              // 商人未解锁
-                    if (trader.LoyaltyLevel < o.LoyaltyLevel) flag = false;           // 忠诚度/威望不够
-                }
+                if (trader == null) return false;                        // 拿不到商人信息 => 不可用
+                if (!trader.Available) return false;                     // 商人未解锁
+                if (trader.LoyaltyLevel < o.LoyaltyLevel) return false;  // 忠诚度/威望不够
             }
             else
             {
                 // ---- 玩家订单：挂单延迟 ----
                 var creationTime = DateTimeExtensions.UtcNow - o.StartTime;
-                if (creationTime.TotalSeconds < delaySinceOfferAdd) flag2 = false;
+                if (creationTime.TotalSeconds < delaySinceOfferAdd) return false;
             }
 
-            return flag && flag2;
+            return true;
         }
 
         // 设置分页上限为指定值，若不启用脚本则改为原值
@@ -154,40 +139,37 @@ namespace RefinedFleaOfferList
             {
                 if (!Activation.Value) return;
 
-                // 取 OfferViewList 的 eviewListType_0 字段
                 var viewTypeField = AccessTools.Field(typeof(OfferViewList), "_viewListType");
                 if (viewTypeField == null) return;
-
                 var viewType = (EViewListType)viewTypeField.GetValue(__instance);
                 if (viewType != EViewListType.AllOffers && viewType != EViewListType.WishList) return;
 
                 var _ragfairField = AccessTools.Field(typeof(OfferViewList), "_ragfair");
-                var _ragfair = (RagFair)_ragfairField.GetValue(__instance);
+                var _ragfair = (RagFair)_ragfairField?.GetValue(__instance);
                 if (_ragfair == null) return;
 
-                // ---- 新增：取 profileId 和 delaySinceOfferAdd ----
-                string profileId = null;
+                // ---- 取 profileId / traders / delaySinceOfferAdd ----
+                string profileId = AccessTools.Field(typeof(OfferViewList), "_profileId")
+                                    ?.GetValue(__instance) as string;
+
+                var traders = AccessTools.Field(typeof(OfferViewList), "_traders")
+                                    ?.GetValue(__instance) as Dictionary<MongoID, Profile.TraderInfo>;
+
                 int delaySinceOfferAdd = 0;
                 try
                 {
-                    // 从 OfferViewList 里反射拿 profileId（如果有对应字段）
-                    var profileIdField = AccessTools.Field(typeof(OfferViewList), "_profileId");
-                    if (profileIdField != null)
-                        profileId = profileIdField.GetValue(__instance) as string;
-
-                    // 从 GlobalConfiguration 拿 delaySinceOfferAdd
                     var gc = Singleton<GlobalConfiguration>.Instance;
                     if (gc != null && gc.RagFair != null)
                         delaySinceOfferAdd = gc.RagFair.delaySinceOfferAdd;
                 }
-                catch { /* 取不到就用默认值 */ }
+                catch { /* 忽略 */ }
+
+                // 统一判定可用性
+                Func<Offer, bool> usable = o => IsOfferUsable(o, profileId, traders, delaySinceOfferAdd);
 
                 // 先获取全部订单，判断是否单项物品
                 var allOffers = _ragfair.Offers?.ToList() ?? new List<Offer>();
                 if (allOffers.Count == 0) return;
-
-                // 统一判定可用性
-                Func<Offer, bool> usable = o => IsOfferUsable(o, _ragfair, profileId, delaySinceOfferAdd);
 
                 bool singleTemplate = allOffers.Select(o => o.Item.TemplateId).Distinct().Count() == 1;
                 if (singleTemplate && SingleVanilla.Value) return;
@@ -209,9 +191,7 @@ namespace RefinedFleaOfferList
                 }
                 if (offers.Count == 0) return;
 
-                int cheapestCount = singleTemplate
-                    ? SingleCount.Value
-                    : 1;
+                int cheapestCount = singleTemplate ? SingleCount.Value : 1;
 
                 // 若某类物品只有不可用订单则保留
                 var groupedByTemplate = allOffers.GroupBy(o => o.Item.TemplateId);
@@ -239,7 +219,6 @@ namespace RefinedFleaOfferList
                                               .Select(p => p.TemplateId.ToString())
                                               .OrderBy(id => id);
                             string buildSignature = string.Join("_", parts);
-
                             var (current, max) = GetItemState.Get(o.Item);
                             return $"{o.Item.TemplateId}_{buildSignature}_{current}_{max}";
                         })
@@ -258,8 +237,7 @@ namespace RefinedFleaOfferList
                         string buildSignature = string.Join("_", parts);
                         return $"{o.Item.TemplateId}_{buildSignature}";
                     })
-                    .SelectMany(g => g.OrderBy(o => o.SummaryCost)
-                                      .Take(cheapestCount))
+                    .SelectMany(g => g.OrderBy(o => o.SummaryCost).Take(cheapestCount))
                     .ToList();
 
                 // 额外保留最低价卢布订单
@@ -295,7 +273,7 @@ namespace RefinedFleaOfferList
                     {
                         var (current, max) = GetItemState.Get(o.Item);
                         return new { Offer = o, Current = current, Max = max, Usable = usable(o) };
-                        }).ToList();
+                    }).ToList();
 
                     // 按模板 + 子物品结构分组
                     var grouped = offerStates
@@ -311,7 +289,6 @@ namespace RefinedFleaOfferList
                     {
                         // 找出该组的最大当前值
                         float maxCurrent = group.Max(x => x.Current);
-
                         var candidates = group.Where(x => x.Current == maxCurrent).ToList();
                         var usableCandidates = candidates.Where(x => x.Usable).ToList();
 
@@ -326,7 +303,7 @@ namespace RefinedFleaOfferList
                             existingIds.Add(bestOffer.Id);
                         }
 
-                        // 如果需要额外保留卢布订单
+                        // 额外保留卢布订单
                         if (RetainRub.Value || singleTemplate)
                         {
                             var rubId = "5449016a4bdc2d6f028b456f";
